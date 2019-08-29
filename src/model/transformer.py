@@ -79,18 +79,26 @@ def gelu(x):
     return 0.5 * x * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
 
-def get_masks(slen, lengths, causal):
+def get_masks(slen, lengths, causal=False, l2r=False, src_lengths=None):
     """
     Generate hidden states mask, and optionally an attention mask.
     """
+    assert not causal or src_lengths is None
     assert lengths.max().item() <= slen
     bs = lengths.size(0)
     alen = torch.arange(slen, dtype=torch.long, device=lengths.device)
     mask = alen < lengths[:, None]
 
-    # attention mask is the same as mask, or triangular inferior attention (causal)
-    if causal:
+    # attention mask is either
+    # the same as mask (default)
+    # triangular inferior attention (causal)
+    # triangular attention only on target (l2r)
+    if causal or l2r:
         attn_mask = alen[None, None, :].repeat(bs, slen, 1) <= alen[None, :, None]
+        if l2r:
+            for i, l in enumerate(lengths):
+                attn_maks[i, :, :l] = True
+
     else:
         attn_mask = mask
 
@@ -329,7 +337,7 @@ class TransformerModel(nn.Module):
         else:
             raise Exception("Unknown mode: %s" % mode)
 
-    def fwd(self, x, lengths, causal, src_enc=None, src_len=None, positions=None, langs=None, cache=None):
+    def fwd(self, x, lengths, causal=False, l2r=False, r2l=False, src_enc=None, src_len=None, positions=None, langs=None, cache=None):
         """
         Inputs:
             `x` LongTensor(slen, bs), containing word indices
@@ -346,13 +354,13 @@ class TransformerModel(nn.Module):
         assert lengths.size(0) == bs
         assert lengths.max().item() <= slen
         x = x.transpose(0, 1)  # batch size as dimension 0
-        assert (src_enc is None) == (src_len is None)
+        assert (src_enc is None) == (src_len is None or l2r)
         if src_enc is not None:
             assert self.is_decoder
             assert src_enc.size(0) == bs
 
         # generate masks
-        mask, attn_mask = get_masks(slen, lengths, causal)
+        mask, attn_mask = get_masks(slen, lengths, causal, l2r=l2r, src_len=src_len)
         if self.is_decoder and src_enc is not None:
             src_mask = torch.arange(src_len.max(), dtype=torch.long, device=lengths.device) < src_len[:, None]
 

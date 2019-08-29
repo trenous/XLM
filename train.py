@@ -165,6 +165,10 @@ def get_parser():
     # training steps
     parser.add_argument("--clm_steps", type=str, default="",
                         help="Causal prediction steps (CLM)")
+    parser.add_argument("--l2r_steps", type=str, default="",
+                        help="L2R translation steps (CLM)")
+    parser.add_argument("--r2l_steps", type=str, default="",
+                        help="R2L translation steps (CLM)")
     parser.add_argument("--mlm_steps", type=str, default="",
                         help="Masked prediction steps (MLM / TLM)")
     parser.add_argument("--mt_steps", type=str, default="",
@@ -266,6 +270,14 @@ def main(params):
             # CLM steps
             for lang1, lang2 in shuf_order(params.clm_steps, params):
                 trainer.clm_step(lang1, lang2, params.lambda_clm)
+
+            # L2R steps
+            for lang1, lang2 in shuf_order(params.l2r_steps, params):
+                trainer.clm_step(lang1, lang2, params.lambda_l2r, l2r=True)
+
+            # R2L steps
+            for lang1, lang2 in shuf_order(params.r2l_steps, params):
+                trainer.clm_step(lang1, lang2, params.lambda_r2l, r2l=True)
 
             # MLM steps (also includes TLM if lang2 is not None)
             for lang1, lang2 in shuf_order(params.mlm_steps, params):

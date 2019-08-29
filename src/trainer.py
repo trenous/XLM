@@ -654,14 +654,22 @@ class Trainer(object):
         assert x.size(1) % 8 == 0
         return x, lengths, positions, langs, idx
 
-    def clm_step(self, lang1, lang2, lambda_coeff):
+    def clm_step(self, lang1, lang2, lambda_coeff, l2r=False, r2l=False):
         """
         Next word prediction step (causal prediction).
         CLM objective.
         """
+
+        causal = not (l2r or r2l)
+        assert causal ^ l2r ^ r2l
+
         assert lambda_coeff >= 0
         if lambda_coeff == 0:
             return
+
+        if r2l:
+            raise NotImplementedError
+
         params = self.params
         name = 'model' if params.encoder_only else 'decoder'
         model = getattr(self, name)
@@ -681,7 +689,7 @@ class Trainer(object):
         x, lengths, langs, pred_mask, y = to_cuda(x, lengths, langs, pred_mask, y)
 
         # forward / loss
-        tensor = model('fwd', x=x, lengths=lengths, langs=langs, causal=True)
+        tensor = model('fwd', x=x, lengths=lengths, langs=langs, causal=causal, l2r=l2r, r2l=r2l)
         _, loss = model('predict', tensor=tensor, pred_mask=pred_mask, y=y, get_scores=False)
         self.stats[('CLM-%s' % lang1) if lang2 is None else ('CLM-%s-%s' % (lang1, lang2))].append(loss.item())
         loss = lambda_coeff * loss
