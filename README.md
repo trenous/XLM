@@ -1,3 +1,24 @@
+# XLM for MTQE
+
+The aim of this project is to to create a unified trainig of machine translation adn quality estimation models.
+
+We are basing our models on the facebook XLM implementation
+The first steps are:
+* Add an objective to XLM that uses triangular attention masking only on the the target side (this allows L2R decoding)
+* Train an XLM model on the WMT QE Indomain corpus using both the original XLM Translation Language Modelling and the new L2R Translation objective. The result of this should be a model that can be used for translation, as well as for bidirectional language modelling (estimating the probability of each word in the target conditioned on the source, and its left AND right context)
+* Evaluate this model for translation quality
+* Finetune this model for Quality Estimation analogous to Unbabel's WMT19 QE shared task submission
+* Evaluate this model for Quality Estimation
+
+The intended outcome should be a single model that performs competitively on both translation and quality estimation. We need to run the following baselines / sanity checks:
+
+* Ensure that the model performs competitively as a translation mode only: Train a fairseq model on the indomain corpus, and train an XLM model with ONLY the transaltion objective, and compare the two
+
+* Pretrain a 'vanilla' XLM on the indomain corpus, finetune for QE
+
+A positive result requires that the jointly trained XLM model performs at least the same as the individually trained translation / QE models. The translation performance should also at least be comparable to a fairseq model trained on the same data.
+
+
 # XLM
 
 PyTorch original implementation of [Cross-lingual Language Model Pretraining](https://arxiv.org/abs/1901.07291). Includes:
@@ -214,7 +235,7 @@ Model | lg | en | es | de | ar | zh | ur
 `mBERT` | 102 | 81.4 | 74.3 | 70.5 | 62.1 | 63.8 | 58.3
 `XLM (MLM)` | 15 | 83.2 | 76.3 | 74.2 | 68.5 | 71.9 | 63.4
 `XLM (MLM+TLM)` | 15 | **85.0** | 78.9 | **77.8** | **73.1** | **76.5** | **67.3**
-`XLM (MLM)` | 17 | 84.8 | **79.4** | 76.2 | 71.5 | 75 | - 
+`XLM (MLM)` | 17 | 84.8 | **79.4** | 76.2 | 71.5 | 75 | -
 `XLM (MLM)` | 100 | 83.7 | 76.6 | 73.6 | 67.4 | 71.7 | 62.9
 
 If you want to play around with the model and its representations, just download the model and take a look at our [ipython notebook](https://github.com/facebookresearch/XLM/blob/master/generate-embeddings.ipynb) demo.
