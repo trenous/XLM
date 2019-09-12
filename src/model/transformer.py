@@ -79,11 +79,11 @@ def gelu(x):
     return 0.5 * x * (1.0 + torch.erf(x / math.sqrt(2.0)))
 
 
-def get_masks(slen, lengths, causal=False, l2r=False, src_lengths=None):
+def get_masks(slen, lengths, causal=False, l2r=False, r2l=False, src_lengths=None):
     """
     Generate hidden states mask, and optionally an attention mask.
     """
-    assert not causal or src_lengths is None
+    assert not (causal or l2r or r2l) or src_lengths is None
     assert lengths.max().item() <= slen
     bs = lengths.size(0)
     alen = torch.arange(slen, dtype=torch.long, device=lengths.device)
@@ -93,10 +93,14 @@ def get_masks(slen, lengths, causal=False, l2r=False, src_lengths=None):
     # the same as mask (default)
     # triangular inferior attention (causal)
     # triangular attention only on target (l2r)
-    if causal or l2r:
+    if causal or l2r or r2l:
         attn_mask = alen[None, None, :].repeat(bs, slen, 1) <= alen[None, :, None]
         if l2r:
             for i, l in enumerate(lengths):
+                attn_maks[i, :, :l] = True
+        if r2l:
+            for i, l in enumerate(lengths):
+                attn_masks[i] = attn_masks[i].transpose(-1)
                 attn_maks[i, :, :l] = True
 
     else:
@@ -264,6 +268,7 @@ class TransformerModel(nn.Module):
         self.n_words = params.n_words
         self.eos_index = params.eos_index
         self.pad_index = params.pad_index
+        self.mask_index = params.mask_index
         self.dico = dico
         self.id2lang = params.id2lang
         self.lang2id = params.lang2id
@@ -354,13 +359,13 @@ class TransformerModel(nn.Module):
         assert lengths.size(0) == bs
         assert lengths.max().item() <= slen
         x = x.transpose(0, 1)  # batch size as dimension 0
-        assert (src_enc is None) == (src_len is None or l2r)
+        assert (src_enc is None) == (src_len is None or l2r or r2l)
         if src_enc is not None:
             assert self.is_decoder
             assert src_enc.size(0) == bs
 
         # generate masks
-        mask, attn_mask = get_masks(slen, lengths, causal, l2r=l2r, src_len=src_len)
+        mask, attn_mask = get_masks(slen, lengths, causal, l2r=l2r, r2l=r2l, src_len=src_len)
         if self.is_decoder and src_enc is not None:
             src_mask = torch.arange(src_len.max(), dtype=torch.long, device=lengths.device) < src_len[:, None]
 
@@ -387,44 +392,47 @@ class TransformerModel(nn.Module):
             mask = mask[:, -_slen:]
             attn_mask = attn_mask[:, -_slen:]
 
+
         # embeddings
-        tensor = self.embeddings(x)
-        tensor = tensor + self.position_embeddings(positions).expand_as(tensor)
-        if langs is not None and self.use_lang_emb:
-            tensor = tensor + self.lang_embeddings(langs)
-        tensor = self.layer_norm_emb(tensor)
-        tensor = F.dropout(tensor, p=self.dropout, training=self.training)
-        tensor *= mask.unsqueeze(-1).to(tensor.dtype)
+        def embed(x):
+            tensor = self.embeddings(x)
+            tensor = tensor + self.position_embeddings(positions).expand_as(tensor)
+            if langs is not None and self.use_lang_emb:
+                tensor = tensor + self.lang_embeddings(langs)
+            tensor = self.layer_norm_emb(tensor)
+            tensor = F.dropout(tensor, p=self.dropout, training=self.training)
+            tensor *= mask.unsqueeze(-1).to(tensor.dtype)
+            return tensor
+
+
+        tensor = embed(x)
+
+        if l2r or r2l:
+            kv = tensor
+            query = x.new_tensor().fill_(self.mask_index)
+            query = embed(query)
+            tensor = query
+        else:
+            kv = None
 
         # transformer layers
         for i in range(self.n_layers):
 
-            # self attention
-            attn = self.attentions[i](tensor, attn_mask, cache=cache)
-            attn = F.dropout(attn, p=self.dropout, training=self.training)
-            tensor = tensor + attn
-            tensor = self.layer_norm1[i](tensor)
+            # self attention(s)
+            tensor = apply_attn(i, tensor, kv=kv)
+            kv = apply_attn(i, kv=kv)
 
             # encoder attention (for decoder only)
             if self.is_decoder and src_enc is not None:
+                tensor = self.encoder_attention(i, tensor, src_enc, cache)
                 attn = self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache)
                 attn = F.dropout(attn, p=self.dropout, training=self.training)
                 tensor = tensor + attn
                 tensor = self.layer_norm15[i](tensor)
 
-            # FFN
-            if ('%i_in' % i) in self.memories:
-                tensor = tensor + self.memories['%i_in' % i](tensor)
-            else:
-                tensor = tensor + self.ffns[i](tensor)
-            tensor = self.layer_norm2[i](tensor)
-
-            # memory
-            if ('%i_after' % i) in self.memories:
-                tensor = tensor + self.memories['%i_after' % i](tensor)
-            # TODO: add extra layer norm here?
-
-            tensor *= mask.unsqueeze(-1).to(tensor.dtype)
+            # FeedForward Part
+            tensor = apply_ffn(i, tensor)
+            kv = apply_ffn(i, tensor)
 
         # update cache length
         if cache is not None:
@@ -433,6 +441,38 @@ class TransformerModel(nn.Module):
         # move back sequence length to dimension 0
         tensor = tensor.transpose(0, 1)
 
+        if kv:
+            return tensor, kv
+        return tensor
+
+    def encoder_attention(self, i, tensor, src_enc, cache):
+        attn = self.encoder_attn[i](tensor, src_mask, kv=src_enc, cache=cache)
+        attn = F.dropout(attn, p=self.dropout, training=self.training)
+        tensor = tensor + attn
+        tensor = self.layer_norm15[i](tensor)
+
+    def apply_attn(self, i, q=None, kv=None):
+        if q is None:
+            return None
+        attn = self.attentions[i](q, attn_mask, cache=cache, kv=kv)
+        attn = F.dropout(attn, p=self.dropout, training=self.training)
+        q = q + attn
+        q = self.layer_norm1[i](q)
+        return q
+
+    def apply_ffn(self, i, tensor=None):
+        if tensor is None:
+            return None
+        if ('%i_in' % i) in self.memories:
+            tensor = tensor + self.memories['%i_in' % i](tensor)
+        else:
+            tensor = tensor + self.ffns[i](tensor)
+        tensor = self.layer_norm2[i](tensor)
+        # memory
+        if ('%i_after' % i) in self.memories:
+            tensor = tensor + self.memories['%i_after' % i](tensor)
+        # TODO: add extra layer norm here?
+        tensor *= mask.unsqueeze(-1).to(tensor.dtype)
         return tensor
 
     def predict(self, tensor, pred_mask, y, get_scores):
