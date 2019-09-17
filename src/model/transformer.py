@@ -83,8 +83,10 @@ def get_masks(slen, lengths, causal=False, l2r=False, r2l=False, src_lengths=Non
     """
     Generate hidden states mask, and optionally an attention mask.
     """
-    assert not (causal or l2r or r2l) or src_lengths is None
+    _causal = causal or l2r or r2l
+    assert not _causal or src_lengths is None
     assert lengths.max().item() <= slen
+
     bs = lengths.size(0)
     alen = torch.arange(slen, dtype=torch.long, device=lengths.device)
     mask = alen < lengths[:, None]
@@ -93,22 +95,21 @@ def get_masks(slen, lengths, causal=False, l2r=False, r2l=False, src_lengths=Non
     # the same as mask (default)
     # triangular inferior attention (causal)
     # triangular attention only on target (l2r)
-    if causal or l2r or r2l:
-        attn_mask = alen[None, None, :].repeat(bs, slen, 1) <= alen[None, :, None]
+    if _causal:
+        attn_mask = mask.unsqueeze(-1).expand(bs, slen, slen).clone()
         if l2r:
-            for i, l in enumerate(lengths):
-                attn_maks[i, :, :l] = True
+            attn_mask = torch.tril(attn_mask, diagonal=-1)
         if r2l:
-            for i, l in enumerate(lengths):
-                attn_masks[i] = attn_masks[i].transpose(-1)
-                attn_maks[i, :, :l] = True
-
+            attn_mask = torch.triu(attn_mask, diagonal=1)
+        for i, l in enumerate(src_lengths):
+            # All positions can look at the entire source
+            attn_masks[i, :, :l] = True
     else:
         attn_mask = mask
 
     # sanity check
     assert mask.size() == (bs, slen)
-    assert causal is False or attn_mask.size() == (bs, slen, slen)
+    assert not _causal or attn_mask.size() == (bs, slen, slen)
 
     return mask, attn_mask
 
@@ -358,12 +359,12 @@ class TransformerModel(nn.Module):
         slen, bs = x.size()
         assert lengths.size(0) == bs
         assert lengths.max().item() <= slen
-        x = x.transpose(0, 1)  # batch size as dimension 0
         assert (src_enc is None) == (src_len is None or l2r or r2l)
         if src_enc is not None:
             assert self.is_decoder
             assert src_enc.size(0) == bs
 
+        x = x.transpose(0, 1)  # batch size as dimension 0
         # generate masks
         mask, attn_mask = get_masks(slen, lengths, causal, l2r=l2r, r2l=r2l, src_len=src_len)
         if self.is_decoder and src_enc is not None:
@@ -408,6 +409,7 @@ class TransformerModel(nn.Module):
         tensor = embed(x)
 
         if l2r or r2l:
+            # Two Stream Self Attention
             kv = tensor
             query = x.new_tensor().fill_(self.mask_index)
             query = embed(query)
@@ -431,8 +433,8 @@ class TransformerModel(nn.Module):
                 tensor = self.layer_norm15[i](tensor)
 
             # FeedForward Part
-            tensor = apply_ffn(i, tensor)
-            kv = apply_ffn(i, tensor)
+            tensor = self.apply_ffn(i, tensor)
+            kv = self.apply_ffn(i, tensor)
 
         # update cache length
         if cache is not None:
